@@ -155,10 +155,24 @@ bindkey menubox \\h FIELD_NEXT
 }
 
 function init_cli() {
-  if [[ -f "$(get_protonvpn_cli_home)/protonvpn_openvpn_credentials" ]]; then
-    echo -n "[!] User profile for protonvpn-cli has already been initialized. Would you like to start over with a fresh configuration? [Y/n]: "
-    read "reset_profile"
+  if source $(get_protonvpn_cli_home)/crypto_vars; then
+    if [[ $GPG_ENABLED == true ]]; then
+      [[ -f $GPG_CREDS_FILE]] ||
+      echo -n "[!] User profile for protonvpn-cli has already been initialized. Would you like to start over with a fresh configuration? [Y/n]: "
+      read "reset_profile"
+    else
+      if [[ -f "$(get_protonvpn_cli_home)/protonvpn_openvpn_credentials" ]]; then
+        echo -n "[!] User profile for protonvpn-cli has already been initialized. Would you like to start over with a fresh configuration? [Y/n]: "
+        read "reset_profile"
+      fi
+    fi
+  else
+    if [[ -f "$(get_protonvpn_cli_home)/protonvpn_openvpn_credentials" ]]; then
+      echo -n "[!] User profile for protonvpn-cli has already been initialized. Would you like to start over with a fresh configuration? [Y/n]: "
+      read "reset_profile"
+    fi
   fi
+
   if  [[ ("$reset_profile" == "n" || "$reset_profile" == "N") ]]; then
      echo "[*] Profile initialization canceled."
      exit 0
@@ -173,7 +187,34 @@ function init_cli() {
   read -s -p "Enter OpenVPN password: " "openvpn_password"
   echo -e "$openvpn_username\n$openvpn_password" > "$(get_protonvpn_cli_home)/protonvpn_openvpn_credentials"
   chown "$USER:$(id -gn $USER)" "$(get_protonvpn_cli_home)/protonvpn_openvpn_credentials"
-  chmod 0400 "$(get_protonvpn_cli_home)/protonvpn_openvpn_credentials"
+  chmod 0600 "$(get_protonvpn_cli_home)/protonvpn_openvpn_credentials"
+
+  read -p "Do you want to encrypt your credentials? [Y/n] " c
+  if [[ ${c,,} == "y" ]]; then
+    echo -ne "Please, enter a passphrase in order to encrypt your credentials.\n> "
+    read gpg_passphrase
+    local GPG_OPTS=(
+    --symmetric
+    --cipher-algo AES256
+    --digest SHA384
+    --s2k-mode 3
+    --s2k-count 10000
+    --s2k-cipher-algo AES256
+    --s2k-digest SHA384
+    --batch
+    --passphrase-fd 0
+    )
+    cd $(get_protonvpn_cli_home)
+    echo "$gpg_passphrase"|gpg "${GPG_OPTS[@]} protonvpn_openvpn_credentials"
+    rm $(get_protonvpn_cli_home)/protonvpn_openvpn_credentials
+    echo "GPG_CREDS_FILE=\"$(get_protonvpn_cli_home)/protonvpn_openvpn_credentials.gpg\"" > $(get_protonvpn_cli_home)/crypto_vars
+    echo "GPG_ENABLED=true" >> $(get_protonvpn_cli_home)/crypto_vars
+    cd - &>/dev/null
+  else
+    chmod 0400 "$(get_protonvpn_cli_home)/protonvpn_openvpn_credentials"
+  fi
+
+
 
   echo -e "\n[.] ProtonVPN Plans:\n1) Free\n2) Basic\n3) Plus\n4) Visionary"
   protonvpn_tier=""
@@ -418,7 +459,13 @@ function check_if_openvpn_is_currently_running() {
 }
 
 function check_if_profile_initialized() {
-  _=$(cat "$(get_protonvpn_cli_home)/protonvpn_openvpn_credentials" "$(get_protonvpn_cli_home)/protonvpn_tier" &> /dev/null)
+  source $(get_protonvpn_cli_home)/crypto_vars
+  if [[ $GPG_ENABLED == true ]]; then
+    _=$(cat "$GPG_CREDS_FILE" "$(get_protonvpn_cli_home)/protonvpn_tier" &> /dev/null)
+  else
+    _=$(cat "$(get_protonvpn_cli_home)/protonvpn_openvpn_credentials" "$(get_protonvpn_cli_home)/protonvpn_tier" &> /dev/null)
+  fi
+
   if [[ $? != 0 ]]; then
     echo "[!] Profile is not initialized."
     echo -e "Initialize your profile using: \n    $(basename $0) --init"
@@ -562,9 +609,21 @@ function openvpn_connect() {
   } &
   status_check_pid=$!
 
+  if [[ -z "${pass}" ]]; then
+    source $(get_protonvpn_cli_home)/crypto_vars
+    read -p "Enter your passphrase: " gpg_passphrase
+    if [[ $GPG_ENABLED == true ]]; then
+      local pass="$(echo \"$gpg_passphrase\"|gpg --batch --passphrase-fd 0 -d $GPG_CREDS_FILE)"
+    else
+      local z=$(get_protonvpn_cli_home)
+      local pass="$(cat ${z}/protonvpn_openvpn_credentials)"
+    fi
+  fi
+
+
   OPENVPN_OPTS=(
     --config "$openvpn_config"
-    --auth-user-pass "$(get_protonvpn_cli_home)/protonvpn_openvpn_credentials"
+    --auth-user-pass "${pass}"
     --auth-retry nointeract
     --verb 4
     --log "$connection_logs"
